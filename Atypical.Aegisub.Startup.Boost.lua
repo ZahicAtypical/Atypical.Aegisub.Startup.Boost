@@ -31,7 +31,7 @@
 --
 --   ⚠️ 要把一个 .moon 变成脚本，请丢进 autoload/（④ 会自动收编）；
 --      autoload.boost.moon/ 是本脚本的档案区，往里丢一个没有对应 autoload/<名>.lua 的母本，
---      会被 ⑤ 当"宿主已删除"移除（仓库 Backup/autoload/ 里留着副本，拷回来即可恢复）。
+--      会被 ⑤ 当"宿主已删除"移除（Backup/autoload/ 里留着副本，拷回来即可恢复）。
 --
 -- 本文件不带 !00_ 前缀：migration04 的 AutoloadScriptManager::Reload 对扫描到的条目
 --   不作任何排序（std::async 提交顺序 = 纯文件系统枚举顺序），前缀从来保证不了
@@ -60,21 +60,21 @@
 --   每次启动都用"源的当前状态"反推产物应有集合（expected_map），DST 里多出来的一律移除。
 --   为什么不拿"清单文件"当判定依据：清单一旦丢失/过期就会误判，且产物早于本功能
 --   存在时无从记录；推算式可自愈。清单仍然生成（manifest.tsv），但只作审计用，不参与判定。
---   移除前**先确认仓库里有对应的源**：include 侧的产物派生于 include/ 里的源，
---   源在仓库里就删掉、不在就保留报警；母本 .moon 同理。恢复 = 从 Backup/ 拷回 automation/。
+--   移除前**先确认 Backup 里有对应的源**：include 侧的产物派生于 include/ 里的源，
+--   源在 Backup 里就删掉、不在就保留报警；母本 .moon 同理。恢复 = 从 Backup/ 拷回 automation/。
 --   另维护 autoload/ 下的包目录符号链接：目标消失即删链接，DST 顶层出现新的无扩展名目录即补链接。
 --   ⚠️ 前提：include.boost.lua/ 归本脚本所有。手放进去的文件**不会**被清理误伤 ——
 --      没有对应源的产物一律保留并记日志（见下"无源保留"），所以**不需要白名单**。
 --      （原 keep.txt 白名单机制已取消，理由见下方取消该机制那段注释。）
 --   保险丝：源目录不齐（app 被移动/卸载）时整轮跳过清理，绝不误删；CLEANUP_ENABLED=false 可整体关停。
 --
--- [源对账 pass ⑤-c] automation/ 现场 ↔ Backup/ 仓库 —— 这一层的形态改过三次，把结论记下来：
+-- [源对账 pass ⑤-c] automation/ 现场 ↔ Backup/ —— 这一层的形态改过三次，把结论记下来：
 --     第一版：给 autoload/ 顶层"无母本"的 .lua 留活副本（Backup/autoload/）。
 --     第二版：扩成"两个源目录的 1:1 实时镜像"（Backup/current/）。
---     现在：镜像层**整个删掉**。理由是实测出来的 —— 那份实时镜像与仓库逐字节全同
+--     现在：镜像层**整个删掉**。理由是实测出来的 —— 那份实时镜像与 Backup 逐字节全同
 --     （唯一差别是 Finder 写的 .DS_Store），每轮拷一份却零信息量。
 --   所以 Backup/ 现在只有两样东西：
---     ① 仓库 Backup/{autoload,include} —— 源文件的完整副本，**只增不删**；
+--     ① Backup/{autoload,include} —— 源文件的完整副本，**只增不删**；
 --     ② 账本 changes.log / state.tsv / audit.tsv —— 本脚本唯一会写的文件。
 --   "现在长什么样"永远现读 automation/，不复制。state.tsv 是本项目唯一被允许的持久状态：
 --   只用来**发现**变化，永不驱动删除/归档；它丢了最坏只是少记一轮变更，绝不会误删任何东西。
@@ -175,16 +175,16 @@ local MANIFEST       = CACHEDIR .. "/manifest.tsv"   -- 产物清单（审计用
 --   增删了哪个链接 / 移除或入库了哪个母本）现在直接写进 build.log；它原有的每轮汇总行与
 --   build.log 的「清理：…」两行逐字段重复（后者还多出"隐藏 / 删除失败 / 现有链接数"）。
 --   ⇒ 少一个文件，动作记录一条不少。
--- [仓库位置] 仓库（Backup/）装的是**不可再生**的东西，所以它不放在日志堆里，
+-- [Backup 位置] Backup 装的是**不可再生**的东西，所以它不放在日志堆里，
 --   而是作为 cache/ 主目录的**兄弟目录**存在：
 --     cache/Atypical.Aegisub.Startup.Boost/         日志与可再生文件，**可以整包删**
---     cache/Atypical.Aegisub.Startup.Boost.Backup/  源文件仓库 + 账本，❗不可再生
+--     cache/Atypical.Aegisub.Startup.Boost.Backup/  源文件副本 + 账本，❗不可再生
 --   （两者曾经放在一起，代价是"主目录可整包删"这条性质失效；分开之后才重新成立。）
 local BACKUPDIR      = ROOT .. "/cache/Atypical.Aegisub.Startup.Boost.Backup"
-local AUDITTSV       = BACKUPDIR .. "/audit.tsv"    -- 现场 vs 仓库 的总账
+local AUDITTSV       = BACKUPDIR .. "/audit.tsv"    -- 现场 vs Backup 的总账
 local BASESTATE      = BACKUPDIR .. "/state.tsv"    -- 上一轮指纹（唯一被本脚本写进 Backup/ 的数据文件）
 local CHANGESLOG     = BACKUPDIR .. "/changes.log"  -- 变更流水（追加式）
-local ZONES          = { "autoload", "include" }   -- Backup/ 下的仓库目录 = 对账范围
+local ZONES          = { "autoload", "include" }   -- Backup/ 下的两个子目录 = 对账范围
 --   对账范围刻意**只管 autoload 和 include** 这两个用户真正会动的源目录。
 --   automation/tests 之类的第三方测试夹具不在其中：启动全程不碰它（启动日志里零引用），
 --   而且它与现场逐字节相同 —— 备份它只是存两遍。
@@ -208,13 +208,13 @@ local DISABLEDDIR    = ROOT .. "/automation/autoload.boost.disabled"  -- 停放�
 --   为什么必须认得它：否则"把脚本停用掉"会被对账报成「已删除」，凭空吓人一跳
 --      —— 一个明明还在磁盘上的脚本，不该在账本里显示成"丢了"。
 local DISABLEDREADME = DISABLEDDIR .. "/README.txt"
--- **Trash 已取消**：它原本兜的是"删掉的东西的最后一份"，而 Backup/ 现在是"只增不删的完整仓库"，
---   删掉的东西本来就一直在仓库里 —— 两个地方都能恢复，就是冗余。
---   所以：⑤-a/⑤-b 改成"确认仓库里有副本才删"，恢复路径统一成"从 Backup/ 拷回 automation/"。
+-- **Trash 已取消**：它原本兜的是"删掉的东西的最后一份"，而 Backup/ 现在是"只增不删的完整副本"，
+--   删掉的东西本来就一直在 Backup 里 —— 两个地方都能恢复，就是冗余。
+--   所以：⑤-a/⑤-b 改成"确认 Backup 里有副本才删"，恢复路径统一成"从 Backup/ 拷回 automation/"。
 local MAINREADME     = CACHEDIR .. "/README.txt"
 -- 取消 keep.txt：原白名单机制已整体删除。理由：
---   它唯一的判定点是"产物不在应有集合里、又不是隐藏文件、**且仓库里能找到对应源**"时生效；
---   而"仓库里找不到源就保留"（无源保留）这条默认规则，已经接管了它原本更广的用途
+--   它唯一的判定点是"产物不在应有集合里、又不是隐藏文件、**且 Backup 里能找到对应源**"时生效；
+--   而"Backup 里找不到源就保留"（无源保留）这条默认规则，已经接管了它原本更广的用途
 --   —— 手放进 include.boost.lua/ 的文件本来就删不掉，不需要用户再登记一遍。
 --   剩下那个窄情形（"用户主动删了源，但想留下已成型的产物"）用"把源留在 include/"解决更好。
 --   ⇒ 少一个需要用户记得它存在的控制文件。
@@ -307,7 +307,7 @@ end
 
 -- 按 mtime 增量复制；返回 "built" / "fresh" / "fail"
 -- 无条件按字节复制（不看 mtime）。
--- ⚠️ copy_if_newer 在这里**不能**用：仓库里那份的 mtime 是"当初复制的那一刻"，
+-- ⚠️ copy_if_newer 在这里**不能**用：Backup 里那份的 mtime 是"当初复制的那一刻"，
 --    永远比源新，`dm >= sm` 恒成立 ⇒ 同步会永远被跳过。这是"补入"第一版埋点。
 local function copy_raw(src, dst)
 	local data = readraw(src)
@@ -550,20 +550,20 @@ end
 
 local function ensure_readmes()
 	write_if_absent(BACKUPDIR .. "/README.txt", {
-		"Backup/ —— 你的 autoload/ 和 include/ 的副本仓库 + 变更账",
+		"Backup/ —— 你的 autoload/ 和 include/ 的源文件副本 + 变更账",
 		"",
 		"这个目录里分两类东西，别搞混：",
 		"",
-		"【仓库 · 脚本写】autoload/   include/",
+		"【Backup · 脚本写】autoload/   include/",
 		"  你这两个源目录里**出现过的所有文件**的副本 —— 首次运行时全量建立，之后每轮把新出现的补进来，",
-		"  改过的同步更新。**只增不删**：你删掉的东西不会从仓库里消失，所以随时能从这里拷回去。",
+		"  改过的同步更新。**只增不删**：你删掉的东西不会从 Backup 里消失，所以随时能从这里拷回去。",
 		"  想恢复：把文件拷回 automation/ 对应目录即可（放回 .moon 或 .lua 都行，下次启动会自动编译）。",
 		"",
 		"【账本 · 脚本写】changes.log   state.tsv   audit.tsv",
-		"  changes.log  源文件有增/删/改就记一行；每轮末尾还有「本轮：」「仓库：」两行汇总（没变也写）。",
+		"  changes.log  源文件有增/删/改就记一行；每轮末尾还有「本轮：」「Backup：」两行汇总（没变也写）。",
 		"  state.tsv    上一轮的文件指纹，脚本自己看，你不用管。",
-		"  audit.tsv    现在 vs 仓库 的总账：一致 / 修改 / 新增 / 已删除 / 已停用。",
-		"               「已删除」= 你删过的（**仓库里副本还在，不是丢失**）；它是累计的，会一直留着。",
+		"  audit.tsv    现在 vs Backup 的总账：一致 / 修改 / 新增 / 已删除 / 已停用。",
+		"               「已删除」= 你删过的（**Backup 里副本还在，不是丢失**）；它是累计的，会一直留着。",
 		"",
 		"这个目录【只管两个源目录】：autoload/ 和 include/ —— 就是你真正会动的两个。",
 		"  automation/tests/ 不进这里：那是 DependencyControl / DepUnit 的单元测试夹具，",
@@ -574,12 +574,12 @@ local function ensure_readmes()
 		"  · 被停用的脚本（autoload/ 里没有、autoload.boost.disabled/ 里有）",
 		"    -> 记「已停用」，**不是「丢失」**。停用脚本本来就该放那儿。",
 		"",
-		"没有「Trash」这个中间站：既然仓库只增不删，删除的东西本来就在里面 ——",
+		"没有「Trash」这个中间站：既然 Backup 只增不删，删除的东西本来就在里面 ——",
 		"  两个地方都能恢复就是冗余。删掉一个脚本后想找回：直接从本目录拷回 automation/。",
 	})
 	write_if_absent(MAINREADME, {
 		"这个目录**可以整包删** —— 里面全是日志，没有一样是删了找不回的。",
-		"（仓库区不在本目录里，而是它的**兄弟目录**，见下。）",
+		"（Backup 文件夹不在本目录里，而是它的**兄弟目录**，见下。）",
 		"（cleanup.log 已并入 build.log，本目录再少一个文件。）",
 		"",
 		"可安全删除（下次启动会重建）：",
@@ -589,7 +589,7 @@ local function ensure_readmes()
 		"  README.txt     本文件（删了自动重建）",
 		"",
 		"⚠️ 真正不能删的东西在**兄弟目录**里，不在本目录内：",
-		"  ../Atypical.Aegisub.Startup.Boost.Backup/   源文件副本仓库（只增不删）+ 变更账  ❗不可再生",
+		"  ../Atypical.Aegisub.Startup.Boost.Backup/   源文件副本（只增不删）+ 变更账  ❗不可再生",
 	})
 end
 
@@ -653,11 +653,15 @@ local function write_disabled_readme()
 	add("      搬 2 个文件：automation/autoload/xxx.lua            →  本文件夹")
 	add("                  automation/autoload.boost.moon/xxx.moon →  本文件夹")
 	add("")
-	add("⚠️ 情形 B 为什么必须把 .moon 一起搬走：")
-	add("   .moon 是源，autoload/xxx.lua 是它编译出来的成品。只搬成品的话，下次启动会重新编译")
-	add("   剩下的源，又生成一个新的 autoload/xxx.lua —— 脚本自己回来了。")
-	add("   （脚本也会顺手处理这种\"没有宿主的母本\"：把它收进仓库、再从 autoload.boost.moon/ 删掉，")
-	add("     所以结果同样是停用成功 —— 但母本就落到仓库里了，不如自己拿着清楚。）")
+	add("⚠️ 情形 B 为什么推荐把 .moon 一起搬走：")
+	add("   .moon 是源，autoload/xxx.lua 是它编译出来的成品。只搬成品、把源留在")
+	add("   autoload.boost.moon/ 里，**也一样能停用成功** —— 脚本会在下一轮把那个源")
+	add("   收进 Backup 文件夹、再从 autoload.boost.moon/ 移除（删之前它会先确认那里有副本，")
+	add("   不会丢东西）。区别只在「源归谁保管」：")
+	add("     · 成对搬   = 源在你自己手上，想恢复直接放回；")
+	add("     · 只搬成品 = 源被脚本收进 cache/Atypical.Aegisub.Startup.Boost.Backup/autoload/，")
+	add("                  要恢复得先去那里把它拷出来。")
+	add("   ⇒ 推荐成对搬，但「不搬就会复活」这个说法并不成立。")
 	add("")
 	add("搬完不用做别的。下次启动 Aegisub 时 autoload/ 里没有它 → 不加载；下面第三项会自动更新。")
 	add("")
@@ -673,7 +677,18 @@ local function write_disabled_readme()
 			add("  ● " .. b)
 			if e.lua  then add(string.format("      %-46s ->  automation/autoload/", e.lua)) end
 			if e.moon then add(string.format("      %-46s ->  automation/autoload.boost.moon/", e.moon)) end
-			if not e.moon then add("      （这个脚本没有母本，只把 .lua 放回 automation/autoload/ 即可）") end
+			if not e.moon then
+				-- 「有没有母本」不能只看本文件夹里有没有 .moon：源可能被 ⑤-a 收进 Backup 了。
+				-- 查一下 Backup —— 有的话说明它**曾经有源**，只是不在现场；这两种情况要分开说。
+				if lfs.attributes(BACKUPDIR .. "/autoload/" .. b .. ".moon", "mode") == "file" then
+					add("      （源不在本文件夹里，但 Backup 文件夹里有一份：")
+					add("         " .. BACKUPDIR .. "/autoload/" .. b .. ".moon")
+					add("        想连源一起拿着，就把它拷进本文件夹；只是要启用脚本的话，把上面那行")
+					add("        .lua 放回 automation/autoload/ 即可）")
+				else
+					add("      （这个脚本没有源，只把 .lua 放回 automation/autoload/ 即可）")
+				end
+			end
 			if not e.lua  then add("      （没有 .lua：只放回母本，下次启动 ② 会自动编译出 autoload/" .. b .. ".lua）") end
 		end
 	end
@@ -701,14 +716,14 @@ local function write_disabled_readme()
 end
 
 
--- ============ ⑤-c 源对账 + 补入：automation/ 现场 ↔ Backup/ 仓库 ============
+-- ============ ⑤-c 源对账 + 补入：automation/ 现场 ↔ Backup/ ============
 -- 形态改过三次，把结论记下来免得再退回去：
 --   第一版：给 autoload/ 顶层"无母本"的 .lua 留活副本（Backup/autoload/）。
 --   第二版：扩成"两个源目录的 1:1 实时镜像"（Backup/current/）。
---   现在：镜像层**整个删掉**。理由是实测出来的 —— 那份实时镜像与仓库逐字节全同
+--   现在：镜像层**整个删掉**。理由是实测出来的 —— 那份实时镜像与 Backup 逐字节全同
 --     （唯一差别是系统写的 .DS_Store），每轮拷一份却零信息量。
 --   ⇒ Backup/ 现在只有两样东西：
---       ① 仓库 Backup/{autoload,include} —— 源文件的完整副本，**只增不删**；
+--       ① Backup/{autoload,include} —— 源文件的完整副本，**只增不删**；
 --       ② 账本 changes.log / state.tsv / audit.tsv —— 本脚本唯一会写的文件。
 --   "现在长什么样"永远现读 automation/，不复制。
 --   state.tsv 是本项目唯一被允许的持久状态：只用来**发现**变化，永不驱动删除/归档；
@@ -858,14 +873,14 @@ local function disabled_pool()
 	return pool
 end
 
--- 补入 / 同步：把现场的源文件收进仓库（Backup/）。
---   补入 = 现场有、仓库没有        -> 新出现的源，收进来（**空仓库时这一步就等于"自举"**）
---   同步 = 现场有、仓库里内容不同  -> 你改过，把副本更新成最新的
--- 仓库**只增不删**：现场删掉的东西不会从仓库里消失 —— 这正是"能恢复"的前提。
+-- 补入 / 同步：把现场的源文件收进 Backup。
+--   补入 = 现场有、Backup 没有        -> 新出现的源，收进来（**Backup 为空时这一步就等于"自举"**）
+--   同步 = 现场有、Backup 里内容不同  -> 你改过，把副本更新成最新的
+-- Backup**只增不删**：现场删掉的东西不会从 Backup 里消失 —— 这正是"能恢复"的前提。
 --   两处特别处理，别当成漏收：
 --     · 母本以 `autoload/<名>.moon` 的身份入库（哪怕它已经被 ④ 搬进 autoload.boost.moon/）；
 --     · ② 的编译产物 `.lua` 不入库（它不是你的源）。
---   代价（写在这里免得以后忘）：仓库只涨不落，"已删除"清单也会一直留着。
+--   代价（写在这里免得以后忘）：Backup 只涨不落，"已删除"清单也会一直留着。
 local function absorb(view, st)
 	local added, synced, failed = 0, 0, 0
 	for rel, meta in pairs(view) do
@@ -882,6 +897,21 @@ local function absorb(view, st)
 	end
 	st.ab_add, st.ab_sync, st.ab_fail = added, synced, failed
 	return true
+end
+
+-- 这个路径现在还在磁盘上吗？—— 用来区分「不再入账」和「真被删掉」。
+--
+-- 为什么需要它（2026-09-17 真机误报，用户发现）：
+--   scan_live() 把「有母本的 autoload/<名>.lua」当 ② 的编译品**排除在账外**。
+--   于是同一份 .lua 会经历「无母本 ⇒ 当源入账」→「有母本 ⇒ 不再入账」这一转变，
+--   在 audit 里就表现为「基线里有、现场视图里没有」⇒ 被误报成「已删除」，
+--   而文件一直好好躺在 autoload/ 里（manifest.tsv 的 adopt 行还标着"在岗"）。
+--   ⇒ 判「已删除」之前，必须先确认它真的不在磁盘上。
+--   注：include/ 一侧没有这类"排除"，不会走到这儿，所以只处理 autoload/。
+local function still_on_disk(rel)
+	local name = rel:match("^autoload/(.+)$")
+	if not name then return false end
+	return lfs.attributes(AUTOLOAD .. "/" .. name, "mode") == "file"
 end
 
 local function write_audit(view)
@@ -907,7 +937,7 @@ local function write_audit(view)
 		if not view[rel] then rels[#rels + 1] = rel end
 	end
 	table.sort(rels)
-	local n_same, n_mod, n_add, n_del, n_off = 0, 0, 0, 0, 0
+	local n_same, n_mod, n_add, n_del, n_off, n_live = 0, 0, 0, 0, 0, 0
 	local rows = {}
 	for _, rel in ipairs(rels) do
 		local v, b = view[rel], base[rel]
@@ -923,39 +953,46 @@ local function write_audit(view)
 			n_add = n_add + 1
 			rows[#rows + 1] = "新增\t" .. rel .. "\t基线里没有"
 		else
-			-- 基线里有、现在 autoload/ 里没有 —— 还要再问一句：是不是你把它停用了？
+			-- 基线里有、现在 autoload/ 里没有 —— 还要再问两句：
+			--   ① 是不是你把它停用了？（在 autoload.boost.disabled/ 里）
+			--   ② 是不是它只是"不再入账"了？（文件还在，只是有了母本、被当编译品排除）
 			local nm = rel:match("([^/]+)$") or rel
 			local stem = nm:gsub("%.[^%.]*$", "")
 			if pool[stem] then
 				n_off = n_off + 1
 				rows[#rows + 1] = "已停用\t" .. rel .. "\t在 autoload.boost.disabled/ 里 —— 你有意停用的，不是丢了"
+			elseif still_on_disk(rel) then
+				n_live = n_live + 1
+				rows[#rows + 1] = "在用\t" .. rel .. "\t现场仍有此文件（它有母本，属 ② 的编译品，不再单独入账）—— 不是丢失"
 			else
 				n_del = n_del + 1
-				rows[#rows + 1] = "已删除\t" .. rel .. "\t源目录里没有了；仓库里还留着副本，可以恢复"
+				rows[#rows + 1] = "已删除\t" .. rel .. "\t源目录里没有了；Backup 里还留着副本，可以恢复"
 			end
 		end
 	end
 	local f = io.open(AUDITTSV, "w")
 	if f then
 		f:write("# Atypical.Aegisub.Startup.Boost —— Backup/audit.tsv\n")
-		f:write("# 现在（automation/） vs 仓库（Backup/autoload | include）\n")
+		f:write("# 现在（automation/） vs Backup（autoload | include）\n")
 		f:write("# 生成 " .. os.date("%Y-%m-%d %H:%M:%S") .. "\n")
-		f:write("# 仓库 = 你的源文件的完整副本（只增不删）。首次运行时自动建立，之后每轮把新出现的源补进来。\n")
-		f:write("# 口径：「一致/修改/新增」说的是**本轮**；「已删除/已停用」是**累计**（删过的东西一直留在仓库里）。\n")
-		f:write(string.format("# 汇总：一致 %d / 修改 %d / 新增 %d / 已删除 %d / 已停用 %d\n",
-			n_same, n_mod, n_add, n_del, n_off))
+		f:write("# Backup = 你的源文件的完整副本（只增不删）。首次运行时自动建立，之后每轮把新出现的源补进来。\n")
+		f:write("# 口径：「一致/修改/新增」说的是**本轮**；「已删除/已停用」是**累计**（删过的东西一直留在 Backup 里）。\n")
+		f:write(string.format("# 汇总：一致 %d / 修改 %d / 新增 %d / 已删除 %d / 已停用 %d / 在用 %d\n",
+			n_same, n_mod, n_add, n_del, n_off, n_live))
 		f:write("#\n# 状态\t相对路径\t说明\n")
 		f:write("#   一致 —— 字节完全相同（正常态）\n")
 		f:write("#   修改 —— 内容变了（你自己改过，或 boost 生成时与原始版本不同）\n")
-		f:write("#   新增 —— 仓库里还没有、现场有了（含 ② 编译产物、④ 收编后的母本、新加的脚本）→ 本轮会补入仓库\n")
-		f:write("#   已删除 —— 仓库里有、现场没有了。**不是丢失**：仓库里那份副本还在，拷回去就能恢复。\n")
+		f:write("#   新增 —— Backup 里还没有、现场有了（含 ② 编译产物、④ 收编后的母本、新加的脚本）→ 本轮会补入 Backup\n")
+		f:write("#   已删除 —— Backup 里有、现场没有了。**不是丢失**：Backup 里那份副本还在，拷回去就能恢复。\n")
 		f:write("#   已停用 —— 「已删除」里的一种：在 autoload.boost.disabled/ 里找到了同名脚本。\n")
 		f:write("#            这是你有意停用的（停用脚本就该放在那儿）。\n")
+		f:write("#   在用 —— 现场其实还有这个文件 —— 别当成丢失。典型是 .lua 有了母本之后被当作\n")
+		f:write("#           ② 的编译品、不再单独入账（Backup 里还留着它当年作为「源」的那份副本）。\n")
 		f:write("#   注：名字带 .bak 的文件不入账 —— 那是你自己留的备份，本就不参与镜像与对账。\n")
 		for _, r in ipairs(rows) do f:write(r .. "\n") end
 		f:close()
 	end
-	return n_same, n_mod, n_add, n_del, n_off
+	return n_same, n_mod, n_add, n_del, n_off, n_live
 end
 
 -- 每轮：① 现场 vs 上轮指纹 -> changes.log；② 现场 vs 基线 -> audit.tsv（仅在真有变化时重算）
@@ -994,9 +1031,9 @@ local function audit_sources(st)
 		end
 	end
 	-- 每轮都重算（去掉了原来的"只在源变了时才重算"门控）。
-	-- 仓库模型下沿用旧结果会和事实不一致：补入之后本来该显示"一致"，却还挂着上一轮的「新增」。
+	-- Backup 模型下沿用旧结果会和事实不一致：补入之后本来该显示"一致"，却还挂着上一轮的「新增」。
 	-- 代价是每轮把源逐字节比一遍（~130 个文件，几毫秒），换"文件里说的话永远是真的"，值。
-	st.au_same, st.au_mod, st.au_add, st.au_del, st.au_off = write_audit(view)
+	st.au_same, st.au_mod, st.au_add, st.au_del, st.au_off, st.au_live = write_audit(view)
 	audited = true
 	-- ⚠️ 顺序：**先对账、后补入**。
 	--    反过来（先补入再对账）的话，本轮的变化会立刻被抹平 ——
@@ -1028,44 +1065,81 @@ local function reap_mothers(st)
 			if r == "fail" then
 				log("母本保留（试编译失败，不归档）：" .. name .. " :: " .. tostring(err))
 			else
-				-- **不再归档进 Trash**（已取消）：改成直接删，但**先确认仓库里有副本**。
-				--   仓库里那份来自"虚拟视图"—— 母本一直以 autoload/<名>.moon 的身份入库，
+				-- **不再归档进 Trash**（已取消）：改成直接删，但**先确认 Backup 里有副本**。
+				--   Backup 里那份来自"虚拟视图"—— 母本一直以 autoload/<名>.moon 的身份入库，
 				--   所以正常情况下一定有；恢复 = 从 Backup/autoload/<名>.moon 拷回 autoload/。
 				--   为什么必须删：不删的话 ② 下一轮就把它编回 autoload/<名>.lua —— **脚本复活**。
 				--   没有副本时**绝不删**：宁可多留一个母本，也不要制造"唯一副本被删掉"。
-				-- 先确保仓库里有这份母本，**再**删。多这一步是因为：
+				-- 先确保 Backup 里有这份母本，**再**删。多这一步是因为：
 				--   ⑤-a 跑在 ⑤-c 的"补入"之前，所以"刚丢进 MOONSRC、还没进过 live 视图"的母本
-				--   此刻仓库里还没有 —— 直接删就成"删掉唯一副本"了。先入库，删除就永远安全。
+				--   此刻 Backup 里还没有 —— 直接删就成"删掉唯一副本"了。先入库，删除就永远安全。
 				local dst = BACKUPDIR .. "/autoload/" .. name
 				local have = (lfs.attributes(dst, "mode") == "file")
 				if not have then
 					have = copy_raw(MOONSRC .. "/" .. name, dst)
 					if have then
-						log(string.format("入库 autoload/%-49s （无宿主的母本，先存进仓库再移除）", name))
+						log(string.format("入库 autoload/%-49s （无宿主的母本，先存进 Backup 再移除）", name))
 					end
 				end
 				if have then
 					local oka, erra = os.remove(MOONSRC .. "/" .. name)
 					if oka then
 						st.reaped = st.reaped + 1
-						log(string.format("移除母本 autoload/%-49s （仓库里已有副本；autoload/%s 已不存在）", name, base .. ".lua"))
+						log(string.format("移除母本 autoload/%-49s （Backup 里已有副本；autoload/%s 已不存在 ⇒ 判为停用）", name, base .. ".lua"))
+						-- 用户看到这行时的第一反应往往是"为什么删我的文件、不帮我编回成品？"
+						-- ⇒ 直接把"想启用该放哪"写进日志，省得他猜（2026-09-17 用户实际困惑点）。
+						log("       ↳ 想启用它：把 .moon 放进 automation/autoload/（不是 autoload.boost.moon/）")
 					else
 						log("移除母本失败（原样保留）" .. name .. " :: " .. tostring(erra))
 					end
-				else
-					log("母本保留（入库失败，不敢删）：" .. name)
-				end
+			else
+				log("母本保留（入库失败，不敢删）：" .. name)
 			end
 		end
 	end
 end
+end
 
--- 仓库里有没有这个产物对应的**源**？
+-- ⑤-d 「在用但没有源」检查：脚本正在用、现场却找不到它的源 —— 报告一次，不动任何文件。
+--   只在一种情形下报：autoload/<名>.lua 在、autoload.boost.moon/<名>.moon 不在，
+--   而 Backup/autoload/<名>.moon **在**。
+--   最后那条判据是关键 —— 它证明这个脚本**曾经以 MoonScript 源的形式存在**，
+--   所以「现场没源」是掉出来的状态，不是它的常态。
+--   （反例：Atypical.* 那批原生 .lua、mocha_powerpin、ua.Relocator —— Backup 里从来没有它们的
+--     .moon，它们本来就「没有源」，不该报。）
+--   ⚠️ 这是**提示不是错误**：用户可能故意让某个脚本没有源（这样就不归 boost 管）。
+--   典型来路：把成品 .lua 从停放区拷回 autoload/ 直接启用，而源留在 Backup 里。
+local function check_detached()
+	local n = 0
+	if lfs.attributes(AUTOLOAD, "mode") ~= "directory" then return 0 end
+	local names = {}
+	for name in lfs.dir(AUTOLOAD) do
+		if name:sub(-4) == ".lua" then names[#names + 1] = name end
+	end
+	table.sort(names)
+	for _, name in ipairs(names) do
+		local full = AUTOLOAD .. "/" .. name
+		if lfs.attributes(full, "mode") == "file" and not link_info(full) then
+			local base = name:sub(1, -5)
+			local live_moon = (lfs.attributes(MOONSRC .. "/" .. base .. ".moon", "mode") == "file")
+			local repo_moon = (lfs.attributes(BACKUPDIR .. "/autoload/" .. base .. ".moon", "mode") == "file")
+			if not live_moon and repo_moon then
+				n = n + 1
+				log(string.format("提醒 autoload/%-49s 正在用，但现场没有它的源（.moon）", name))
+				log(string.format("     ↳ 源在 Backup 里：Backup/autoload/%s.moon", base))
+				log("     ↳ 想让它有源：把那份 .moon 拷进 automation/autoload.boost.moon/")
+			end
+		end
+	end
+	return n
+end
+
+-- Backup 里有没有这个产物对应的**源**？
 --   产物的相对路径（相对 include.boost.lua/）与源（相对 include/）同构，只有扩展名可能不同：
 --     include/pkg/a.moon  --编译-->  pkg/a.lua      候选：pkg/a.lua（镜像产物）/ pkg/a.moon（编译产物）
 --     include/Top.lua     --镜像-->  Top.lua        候选：Top.lua
 -- 找不到就**别删产物** —— 删了就真没了。这是"绝不硬删"这条老规矩的新落点：
--- 以前靠 archive 进 Trash 保命，现在靠"仓库里有源"来判定。
+-- 以前靠 archive 进 Trash 保命，现在靠"Backup 里有源"来判定。
 local function repo_has_source(rel)
 	for _, c in ipairs({ rel, (rel:gsub("%.lua$", ".moon")) }) do
 		if lfs.attributes(BACKUPDIR .. "/include/" .. c, "mode") == "file" then return true end
@@ -1098,19 +1172,19 @@ local function cleanup(exp, st)
 			if nm:sub(1, 1) == "." then
 				st.hidden = st.hidden + 1        -- 隐藏文件（.DS_Store 之类）不是本脚本产物，不碰
 			elseif not repo_has_source(rel) then
-				-- 仓库里找不到这个产物对应的源 ⇒ 它可能是那份内容**仅存的形式**，不删。
-				-- （正常的历史孤儿产物，源都还在仓库里，所以会被正常删掉；这条只兜真正的例外。）
+				-- Backup 里找不到这个产物对应的源 ⇒ 它可能是那份内容**仅存的形式**，不删。
+				-- （正常的历史孤儿产物，源都还在 Backup 里，所以会被正常删掉；这条只兜真正的例外。）
 				st.nosrc = st.nosrc + 1
-				log("产物保留（仓库里找不到对应源，删了就真没了）" .. rel)
+				log("产物保留（Backup 里找不到对应源，删了就真没了）" .. rel)
 			else
 				st.want = st.want + 1
-				-- 不再归档进 Trash：源在仓库里，删掉即可（要恢复就从仓库拷回 include/）。
+				-- 不再归档进 Trash：源在 Backup 里，删掉即可（要恢复就从 Backup 拷回 include/）。
 				-- ⚠️ 失败时**保持原样**，绝不退回 rm 硬删 —— 宁可留着。
 				local p = DST .. "/" .. rel
 				local okr, errr = os.remove(p)
 				if okr then
 					st.removed = st.removed + 1
-					log(string.format("删除产物 include/%-45s （源已不存在，仓库里有副本）", rel))
+					log(string.format("删除产物 include/%-45s （源已不存在，Backup 里有副本）", rel))
 				else
 					-- 失败绝不静默：曾经判定该删若干、结果一个都没动且无任何报错，白查了半天。
 					st.rm_fail = st.rm_fail + 1
@@ -1217,12 +1291,12 @@ local function write_manifest(exp)
 	f:write("#   已就位 N B —— 产物存在，占 N 字节。这是正常态。               （compile / mirror）\n")
 	f:write("#   缺失       —— 源还在、产物却查不到，本应已生成。异常，看 build.log。（compile / mirror）\n")
 	f:write("#   在岗       —— 母本有宿主 autoload/<名>.lua，脚本正在使用。       （adopt）\n")
-	f:write("#   无宿主     —— 母本没有对应 autoload/<名>.lua，下次启动移除（仓库里有副本）。（adopt）\n")
+	f:write("#   无宿主     —— 母本没有对应 autoload/<名>.lua，下次启动移除（Backup 里有副本）。（adopt）\n")
 	f:write("#   有效       —— 链接目标存在，可正常借道。                       （link）\n")
 	f:write("#   悬空       —— 链接目标不存在，下次启动删除。                   （link）\n")
 	f:write("#\n")
-	f:write("# 规则：源消失 -> 下次启动删掉对应产物/母本，**但删之前先确认 Backup 仓库里有对应副本**；\n")
-	f:write("#       仓库里找不到就保留并记日志（绝不制造「唯一副本被删掉」）。\n")
+	f:write("# 规则：源消失 -> 下次启动删掉对应产物/母本，**但删之前先确认 Backup 里有对应副本**；\n")
+	f:write("#       Backup 里找不到就保留并记日志（绝不制造「唯一副本被删掉」）。\n")
 	f:write("#       恢复 = 从 Backup/ 拷回 automation/ 对应位置。账本见 Backup/changes.log 与 Backup/audit.tsv。\n")
 
 	local have, missing = 0, 0
@@ -1433,7 +1507,7 @@ local function run()
 	ok, lfs = pcall(require, "lfs")
 	if not ok or not lfs then return end
 	-- 最后一道：推导出来的 ROOT 必须**真的是个目录**。宁可这一轮什么都不做，
-	-- 也不能把产物与仓库建到一个不存在的地方 —— 那会让 ⑤ 的每一条判断都落空，
+	-- 也不能把产物与 Backup 建到一个不存在的地方 —— 那会让 ⑤ 的每一条判断都落空，
 	-- 而且表面上不会报任何错。（推导里已经挡掉了"解不出来的说明符"，这里挡的是"路径存在但不对"。）
 	if lfs.attributes(ROOT, "mode") ~= "directory" then return end
 	ok, moonscript = pcall(require, "moonscript")
@@ -1465,7 +1539,7 @@ local function run()
 	-- 停放区也常驻 + 生成自述：首次运行就建出来，README 第三项随内容更新。
 	mkdirp(DISABLEDDIR)
 	write_disabled_readme()
-	-- 仓库的首轮填充不需要单独一步：⑤-c 的"补入"在空仓库时就是把现场抄进来（= 自举）。
+	-- Backup 的首轮填充不需要单独一步：⑤-c 的"补入"在 Backup 为空时就是把现场抄进来（= 自举）。
 
 	if DIAG and selftest_due() then
 		log("自检：---- 脚本版本已变化，跑一次环境自检 ----")
@@ -1481,7 +1555,7 @@ local function run()
 	             nosrc = 0, hidden = 0, scanned = 0, want = 0, rm_fail = 0,
 	             link_have = 0,
 	             ch_add = 0, ch_mod = 0, ch_del = 0, ch_same = 0,
-	             au_same = 0, au_mod = 0, au_add = 0, au_del = 0, au_off = 0,
+	             au_same = 0, au_mod = 0, au_add = 0, au_del = 0, au_off = 0, au_live = 0,
 	             ab_add = 0, ab_sync = 0, ab_fail = 0 }
 
 	-- ① 被 require 的模块目录
@@ -1518,8 +1592,20 @@ local function run()
 
 	-- ② autoload 脚本自身：母本 .moon 存于 autoload.boost.moon/，编译品直接落到 autoload/<同名>.lua
 	--    这样 Aegisub 扫到的是纯 Lua，完全跳过 MoonScript 现编译。
-	--    注意：autoload 扫描是 *.* 且不递归，两者不能同名共存（会双重加载、宏重复注册），
-	--    所以 .moon 一旦移入 autoload.boost.moon/ 就不能再放回 autoload。
+	--    注意：autoload 扫描是 *.* 且不递归，两者**不能**同名共存（会双重加载、宏撞名）。
+	--    （2026-09-17 拉下 arch1t3cht/Aegisub @ migration04 源码 + 真机实测，结论：
+	--      · auto4_base.cpp `AutoloadScriptManager::Reload` 对每个文件起
+	--        std::async(std::launch::async, …) —— **并发加载**；文件顺序来自
+	--        std::filesystem::directory_iterator（readdir 原始顺序，**不排序**）。
+	--      · auto4_lua.cpp：pattern "*.lua,*.moon" 两种都收；宏全名 =
+	--        "automation/lua/<文件名stem>/<宏名>" ⇒ 同名 .lua/.moon 的宏全名完全一样。
+	--      · command.cpp：`cmd_map.emplace(name, …)` —— **先到先得，后来的静默丢弃**
+	--        （不是覆盖：emplace 不覆盖已有 key，返回值还被忽略，连警告都没有）。
+	--      ⇒ 「会不会双载」是**竞态**。实测（04:41，把一对同名文件放进 autoload/ 后重启）：
+	--        **只加载了一个** —— DepCtrl 日志只多 1 份、菜单只 1 项、耗时也只多 1 个脚本的量。
+	--        原因是新 cp 进去的文件在目录项里排在后面，而本脚本的 ④ 跑得够快、先把它搬走了。
+	--        ⚠️ 但这只是**这次赢了**：readdir 顺序不承诺、线程调度与系统负载都会变。
+	--        ⇒ 别主动制造同名共存，也别依赖"反正 boost 会收拾"。）
 	local al_cost = 0
 	if lfs.attributes(MOONSRC, "mode") == "directory" then
 		for name in lfs.dir(MOONSRC) do
@@ -1588,6 +1674,9 @@ local function run()
 	--    放在所有 pass 之后跑，读到的是本轮**安定后**的现场（② 编译出的 .lua、④ 搬走的 .moon 都已就位）。
 	local au_done = audit_sources(st)
 
+	-- ⑤-d 「在用但没有源」检查：只报告，不动任何文件（判据与理由见函数上方注释）
+	local n_detached = check_detached()
+
 	local n_have, n_missing = write_manifest(exp)
 
 	log(string.format("完成：新编译 %d / 已最新 %d / 失败 %d / 编译耗时 模块%.1fs + autoload%.1fs",
@@ -1595,12 +1684,15 @@ local function run()
 	log(string.format("镜像：新复制 %d / 已最新 %d / 失败 %d", mirrored, m_fresh, m_fail))
 	log(string.format("收编：新收 %d 个 .moon（旧同名母本另存 %d）", adopted, conflict))
 	if au_done then
-		log(string.format("对账：一致 %d / 修改 %d / 新增 %d / 已删除 %d / 已停用 %d  -> Backup/audit.tsv",
-			st.au_same, st.au_mod, st.au_add, st.au_del, st.au_off))
-		log(string.format("仓库：补入 %d / 同步 %d / 失败 %d（Backup 只增不删）",
+		log(string.format("对账：一致 %d / 修改 %d / 新增 %d / 已删除 %d / 已停用 %d / 在用 %d  -> Backup/audit.tsv",
+			st.au_same, st.au_mod, st.au_add, st.au_del, st.au_off, st.au_live))
+		log(string.format("Backup：补入 %d / 同步 %d / 失败 %d（只增不删）",
 			st.ab_add, st.ab_sync, st.ab_fail))
 	else
 		log("对账：源目录本轮无变化，audit.tsv 沿用上次")
+	end
+	if n_detached > 0 then
+		log(string.format("提醒：%d 个脚本「正在用但没有源」—— 不影响运行，只是失去了可就地重编的源（明细见上）", n_detached))
 	end
 	log(string.format("变更：新增 %d / 修改 %d / 删除 %d / 未变 %d  -> Backup/changes.log",
 		st.ch_add, st.ch_mod, st.ch_del, st.ch_same))
@@ -1623,7 +1715,7 @@ local function run()
 	-- 它逐字段与上面两行「清理：…」重复，而"每轮留痕"由本函数开头的 "---- 时间 ----" 承担。
 	changes_line(string.format("本轮：新增 %d / 修改 %d / 删除 %d / 未变 %d",
 		st.ch_add, st.ch_mod, st.ch_del, st.ch_same))
-	changes_line(string.format("仓库：补入 %d / 同步 %d（Backup 只增不删，删掉的还在仓库里）",
+	changes_line(string.format("Backup：补入 %d / 同步 %d（只增不删，删掉的还在里面）",
 		st.ab_add, st.ab_sync))
 
 	logf:close()
