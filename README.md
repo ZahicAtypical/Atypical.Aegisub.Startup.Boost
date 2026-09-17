@@ -60,7 +60,7 @@ Aegisub 的自动化系统在启动时会扫描 `automation/autoload/`，逐个�
 
 | 路径 | 内容 | 能删吗 |
 |---|---|---|
-| `automation/include.boost.lua/` | 编译成品 + `include/` 的镜像 | 能，下次启动重建 |
+| `automation/include.boost.lua/` | 编译成品 + `include/` 的镜像（含自动生成的 `README.txt`） | 能，下次启动重建 |
 | `automation/autoload.boost.moon/` | autoload 脚本的 `.moon` 母本 | ❌ 见下 |
 | `automation/autoload.boost.disabled/` | 停用脚本的停放区（自带说明） | ❌ 见下 |
 | `cache/Atypical.Aegisub.Startup.Boost/` | 日志、产物清单、自检指纹 | **能整包删**，全是日志 |
@@ -79,6 +79,32 @@ Aegisub 的自动化系统在启动时会扫描 `automation/autoload/`，逐个�
 
 它保存 `autoload/` 与 `include/` 里**出现过**的所有文件，**只增不删** —— 所以删掉的脚本永远能从这里拷回去。
 同一目录下还有三本账：`changes.log`（变更流水）、`audit.tsv`（现状 vs Backup 总账）、`state.tsv`（上轮指纹）。
+
+### `DepCtrl` 替身（默认开启）
+
+本脚本默认会把 `include.boost.lua/l0/DependencyControl.lua` 换成一个**轻量替身**。
+
+**为什么**：DepCtrl 不是"共享组件"，而是**每个脚本各自 `require` 一遍的普通模块代码**；
+Aegisub 又给每个脚本一份独立的 `lua_State`、`package.loaded` 不共享 ⇒ 7 个用它的脚本
+= 那 42 个模块的框架被完整执行 7 遍。这是预编译之后剩下的最大一块成本
+（本机实测：**主窗口 4.10 s → 0.88 s**）。
+
+**代价**：脚本与模块**不再自动更新** —— DepCtrl 的核心功能就是按 feed 检查并升级。
+这是省时的来源，不是故障。想升级某个脚本/模块：手动下载覆盖，或先把它关掉跑一轮。
+
+**安全设计**：
+
+- 真框架的编译产物**另存为**同目录的 `DependencyControl.lua.bak`，随时可复原；
+- 只替换这一个文件 —— 不动框架的 `.moon` 源、不动任何脚本、不碰 `autoload/`；
+- **探针**：替身遇到自己没实现的接口会写日志并**明确报错**，不静默假装成功。
+
+**关掉它**：把脚本配置区里的 `DEPCTRL_SHIM` 改成 `false` —— 下次启动自动还原真框架，之后不再装回。
+
+**手工还原**（不方便改脚本时）：删掉 `DependencyControl.lua`，把 `DependencyControl.lua.bak`
+改名去掉 `.bak` 后缀。
+⚠️ 只要 `DEPCTRL_SHIM` 还是 `true`，下次启动会把替身装回去 —— 所以它只顶一次。
+
+`include.boost.lua/README.txt`（本脚本自动生成）里写着同样的内容，本地随时可查。
 
 ---
 
@@ -131,6 +157,8 @@ Aegisub 就不会加载它了。该目录里有一份自动生成的说明，会
 
   > 顺带：要给一个**已在用**的脚本换源（更新 `.moon`），放进 `automation/autoload.boost.moon/`
   > 覆盖旧母本即可 —— 那里不会与 `autoload/` 里的成品撞名。
+- **替换 DepCtrl 之后，脚本与模块不再自动更新**（见上「`DepCtrl` 替身」一节）。
+  这是取舍、不是故障；想恢复自动更新：把 `DEPCTRL_SHIM` 改成 `false`。
 - 脚本自己不会注册任何宏，也不会弹窗。
 
 ---

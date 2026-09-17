@@ -171,6 +171,14 @@ local CLEANUP_ENABLED = true   -- false = 只生成不清理（排查用）
 local LINK_RECONCILE = true    -- 自动维护 autoload/<无扩展名包目录> 符号链接
 local LINKPREFIX     = "../include.boost.lua/"
 local MANIFEST       = CACHEDIR .. "/manifest.tsv"   -- 产物清单（审计用，不参与清理判定）
+-- ⑥ DepCtrl 替身开关（细节见 §⑥ 与 include.boost.lua/README.txt）
+--   true  = 把 include.boost.lua/l0/DependencyControl.lua 换成轻量替身
+--           （本机实测主窗口 4.101 s → 0.880 s；代价：脚本与模块不再自动更新）。
+--           真框架的编译产物会另存为同目录的 `DependencyControl.lua.bak`，随时可复原。
+--   false = 不动它；若之前装过，下一轮启动自动把 .bak 还原回去。
+--   为什么能做：7 个脚本各自把 DepCtrl 框架（42 个模块 / 474 KB）在自己那份 lua_State 里
+--   执行一遍，实测合计约 6 s —— 这是预编译之后剩下的最大一块成本。
+local DEPCTRL_SHIM   = true
 -- 日志合并：`cleanup.log` 已取消：它的逐条动作行（删了哪个产物 / 收了哪个空目录 /
 --   增删了哪个链接 / 移除或入库了哪个母本）现在直接写进 build.log；它原有的每轮汇总行与
 --   build.log 的「清理：…」两行逐字段重复（后者还多出"隐藏 / 删除失败 / 现有链接数"）。
@@ -1134,6 +1142,451 @@ local function check_detached()
 	return n
 end
 
+-- ============ ⑥ DepCtrl 轻量替身（可开关，见文件头 DEPCTRL_SHIM）============
+-- 背景：DepCtrl 是"每个脚本各自 require 一遍的普通模块代码"，而 Aegisub 给每个脚本一份
+--   独立的 lua_State、package.loaded 不共享 ⇒ 7 个用它的脚本 = 框架被完整执行 7 遍
+--   （42 个模块 / 474 KB，实测合计约 6 s）。这是预编译（①②③）之后剩下的最大一块成本，
+--   而且预编译消不掉它 —— 编译线管的是 .moon，这一条是**运行线**，两件事正交。
+--
+-- 做法：只把 `l0/DependencyControl.lua` 换成"只实现脚本真正用到的接口"的替身（约 13 KB）。
+--   不改任何脚本、不动框架的 .moon 源、也不碰 autoload/ 里的任何东西。
+--   真框架的编译产物另存为同目录的 `.lua.bak` ⇒ 复原 = 删替身 + 把 .bak 改名（访达里两下）。
+--
+-- 为什么落在 include.boost.lua/ 里：autoload/l0 是指向本目录的符号链接，而 require 的
+--   package.path 第一项就是这个产物目录 ⇒ 换掉这里那一份，所有 require 都命中替身。
+--   （2026-09-17 实测确证：5 个脚本每次启动都命中同一个路径。）
+--
+-- ⚠️ 代价说清楚：脚本与模块**不再自动更新** —— DepCtrl 的核心功能就是按 feed 自动升级。
+--   这是省时的来源，不是 bug。想升级：手动覆盖，或先把 DEPCTRL_SHIM 关一轮。
+--
+-- 幂等：内容一致就一个字都不写（不刷 mtime、不记日志）。只有状态真的变了才动。
+local SHIM_TARGET  = DST .. "/l0/DependencyControl.lua"
+local SHIM_STANDBY = SHIM_TARGET .. ".bak"           -- 真框架产物待命处（.bak 名字全 pass 豁免）
+local SHIMLOG      = CACHEDIR .. "/depctrl-shim.log" -- 替身自己的诊断日志（它自己持续追加）
+local SHIM_LOG_MAX = 1024 * 1024                     -- 超 1 MB 清空重来（纯排查辅助，删了无损）
+-- 替身源码里必然出现的一句话。用它识别"目标是不是替身（哪怕不是当前版本）"——
+-- 必须把「旧版替身」和「真框架产物」分开：前者直接覆盖，后者要先存 .bak（见 apply_depctrl_shim）。
+local SHIM_MARK = "DepCtrl 的轻量替身"
+
+-- 替身源码（内嵌；母本在工作区 shim/DependencyControl.lua，改替身要重新内嵌）。
+--   它写入磁盘后是个**独立文件**、由 require 加载 —— 里面用 debug.getinfo 反推自身路径
+--   来定位诊断日志，所以写出去之后的行为与开发时一致。
+local SHIM_SRC = [==[
+--[[[
+  l0/DependencyControl.lua —— DepCtrl 的轻量替身（v5，2026-09-17）
+
+  ⚠️ 这个文件由 boost 脚本（Atypical.Aegisub.Startup.Boost.lua）**自动生成**，
+     别手工改它 —— 下次启动会被覆盖（内容变了就会重写一次）。
+     手工改也没用：boost 每轮拿内嵌的源码跟它对内容，不一致就重写。
+
+  ── 我是什么、从哪来 ──────────────────────────────────────────
+  我是 include/l0/DependencyControl.moon（真框架，42 个模块）的**轻量替代品**。
+  真框架的编译产物被另存为同目录的 `DependencyControl.lua.bak` —— 那是恢复用的原件。
+
+  ── 为什么存在 ────────────────────────────────────────────────
+  完整版 DependencyControl 是 42 个 MoonScript 模块。Aegisub 给每个脚本一份独立 lua_State、
+  package.loaded 不共享 ⇒ 每个用到它的脚本/模块都要把整个框架重新执行一遍（实测 0.6~1.3 s/个）。
+  替身把这一层压掉之后，本机实测主窗口 4.101 s → 0.880 s。
+
+  本替身只实现脚本与模块生态**真正用到**的接口（已用 grep 对编译产物全树核实）：
+
+      DependencyControl(spec)            构造（脚本记录 / 模块记录两种）
+      rec:requireModules([清单])         按清单逐个 require，支持占位表（循环依赖）
+      rec:register(selfRef)              模块发布自己（占位表 __index 委托到真内容）
+      rec:registerMacro / registerMacros 转成 aegisub.register_macro
+      rec:getLogger()                    空 logger
+      rec:checkOptionalModules(names)    可选模块探测 → (是否齐全, 缺失消息)
+      DependencyControl.UnitTestSuite    接到真实 utils 模块（equals / itemsEqual）
+      DependencyControl.<其它类字段>      探针：递归万能 stub + 记日志
+
+  ── 想恢复真框架（任选一条）──────────────────────────────────
+   ① 访达里两步：删掉 `DependencyControl.lua`，把 `DependencyControl.lua.bak` 改名去掉 .bak
+   ② 把 boost 脚本里的 DEPCTRL_SHIM 改成 false，下次启动自动还原（它还会删掉那份 .bak）
+   ③ 更新 DepCtrl 框架本体（往 include/l0/ 放新的 .moon）—— ① 重编译后会顶掉替身，
+      本脚本检测到"目标不再是替身"时会重新就位（新框架产物会被另存为新 .bak）
+
+  ── 代价（这不是缺陷，是省时的来源）──────────────────────────
+  脚本与模块**不再自动更新** —— DepCtrl 的核心功能就是按 feed 检查并升级。
+  想升级某个脚本/模块：手动下载覆盖，或先恢复真框架跑一轮。
+
+  ── 占位表（dummy ref）机制 —— 循环依赖的关键 ─────────────────
+  与真框架（ModuleLoader.createDummyRef / PackageRecord.register）语义一致：
+    · 记录带 moduleName 时创建占位表并登记 byName[moduleName]
+    · requireModules 碰到「已在登记表里的模块名」⇒ 返回占位表（它正在加载中）
+    · 模块加载完调 register(真内容) ⇒ 占位表 __index 指向真内容、byName 更新为真内容
+    ⇒ 依赖方早先拿到的占位表自动"长出"真内容，循环依赖不再互锁。
+
+  ── 有意放弃的能力（这正是省时的来源）────────────────────────
+  自动更新（feed 检查）、模块版本校验、配置管理、单元测试、信任机制。
+
+  ── 原则：探针 + 不静默兜底 ───────────────────────────────────
+  · 记录对象上任何未实现的成员访问 → 写诊断日志并返回 nil（调用即报错，点名到方法）
+  · 类字段访问 → 写日志并返回万能 stub（不崩，但行为可能不完整 —— 由探针日志暴露）
+  · 模块加载失败 → error 并点名
+--]]
+
+local M = {}
+
+-- ── 内部状态 ──────────────────────────────────────────────
+-- byName[moduleName] = 占位表（加载中）→ 真内容（register 后）
+local byName = {}
+
+local unpack = unpack or table.unpack
+
+local SELF = (debug.getinfo(1, "S").source or ""):gsub("^@", "")
+local ROOT = SELF:match("^(.-)/automation/")
+local LOGP = ROOT and (ROOT .. "/cache/Atypical.Aegisub.Startup.Boost/depctrl-shim.log") or nil
+
+local function diag(fmt, ...)
+	if not LOGP then return end
+	local f = io.open(LOGP, "a")
+	if not f then return end
+	f:write(os.date("%H:%M:%S"), "  ", string.format(fmt, ...), "\n")
+	f:close()
+end
+
+local function g(k) return rawget(_G, k) end
+
+local function modNameOf(item)
+	if type(item) == "string" then return item end
+	if type(item) == "table" then return item.name or item[1] end
+	return nil
+end
+
+-- 空 logger：本替身不做日志。目前只有 arch.PerspectiveMotion 取它，且取到后未使用。
+local nullLogger = setmetatable({}, { __index = function() return function() end end })
+
+-- ── 记录对象（方法表 + 探针元表）──────────────────────────
+local rec = {}
+
+local function who(t)
+	return tostring(rawget(t, "_scriptName") or rawget(t, "_moduleName") or "?")
+end
+
+function rec.requireModules(self, modules)
+	local list = modules or self._modules or {}
+	local out, bad = {}, {}
+	for i, name in ipairs(list) do
+		local dummy = byName[name]                    -- 正在加载中 ⇒ 占位表
+		if dummy then
+			out[i] = dummy
+		else
+			local ok, mod = pcall(require, name)
+			if ok then
+				-- 模块在自己的记录里登记了占位表 ⇒ 与真框架一致，返回占位表（__index 已委托）
+				out[i] = byName[name] or mod
+			else
+				bad[#bad + 1] = string.format("%s (%s)", name, tostring(mod):gsub("^.*:%d+: ", ""))
+			end
+		end
+	end
+	if #bad > 0 then
+		diag("失败：%s 的模块加载不了 → %s", who(self), table.concat(bad, " / "))
+		error(string.format("[DepCtrl 轻量替身] %s：以下模块加载失败 → %s",
+			who(self), table.concat(bad, " / ")), 0)
+	end
+	return unpack(out, 1, #out)
+end
+
+---与 PackageRecord.register 语义一致：占位表 __index 委托到真内容。
+function rec.register(self, selfRef)
+	if self._dummy then self._dummy.__index = selfRef end
+	if self._moduleName then
+		package.loaded[self._moduleName] = selfRef
+		byName[self._moduleName] = selfRef          -- 之后 requireModules 直接拿真内容
+	end
+	diag("注册模块：%s（占位表已委托到真内容）", tostring(self._moduleName or self._scriptName))
+	return selfRef
+end
+
+function rec.registerMacro(self, name, description, process, validate, isActive, submenu)
+	-- 兼容 registerMacro(processFn)：名字与描述取自脚本元数据
+	if type(name) == "function" then
+		process, validate, isActive, submenu = name, description, process, validate
+		name, description = self._scriptName, self._scriptDescription
+	end
+	if submenu == true then submenu = self._scriptName end
+
+	if name == nil then
+		error("[DepCtrl 轻量替身] registerMacro：宏名为 nil（脚本没有设置 script_name 全局变量？）", 0)
+	end
+	if type(process) ~= "function" then
+		error(string.format("[DepCtrl 轻量替身] registerMacro：宏 %s 的处理函数不是函数（%s）",
+			tostring(name), type(process)), 0)
+	end
+
+	local parts = {}
+	if submenu then parts[#parts + 1] = tostring(submenu) end
+	parts[#parts + 1] = tostring(name)
+	local menuName = table.concat(parts, "/")
+
+	aegisub.register_macro(menuName, description, process, validate, isActive)
+	diag("注册宏：%s  →  \"%s\"", who(self), menuName)
+	return menuName
+end
+
+function rec.registerMacros(self, macros, submenuDefault)
+	if submenuDefault == nil then submenuDefault = true end
+	for _, macro in ipairs(macros or {}) do
+		-- 与真框架同一套索引规则：宏表首项是函数时 submenu 落在第 4 位，否则第 6 位
+		local idx = (type(macro[1]) == "function") and 4 or 6
+		if macro[idx] == nil then macro[idx] = submenuDefault end
+		self:registerMacro(unpack(macro, 1, 6))
+	end
+end
+
+---检查可选模块是否在系统上（ModuleLoader.checkOptionalModules 的轻量版）。
+---ASSFoundation 用它探测 Yutils：`local _, msg = version:checkOptionalModules("Yutils")`。
+---真实现里"缺"会拼一段下载提示；替身如实返回 (false, 消息)，但在系统上时返回 (true) —— 不报错。
+function rec.checkOptionalModules(self, ...)
+	local missing = {}
+	for _, name in ipairs({ ... }) do
+		if not byName[name] then
+			local ok = pcall(require, name)
+			if not ok then missing[#missing + 1] = tostring(name) end
+		end
+	end
+	if #missing > 0 then
+		local msg = "缺少可选模块：" .. table.concat(missing, ", ")
+			.. "（相关功能不可用，其余功能不受影响；想恢复请装回这些模块）"
+		diag("checkOptionalModules：%s 缺 %s", who(self), table.concat(missing, ", "))
+		return false, msg
+	end
+	return true
+end
+
+function rec.getLogger()
+	return nullLogger
+end
+
+-- 探针：未实现的成员访问 → 记日志、返回 nil（调用即报错且点名）
+local recMT = {
+	__index = function(t, k)
+		if rec[k] ~= nil then return rec[k] end
+		diag("⚠️ 探针：%s 访问了替身未实现的成员 .%s", who(t), tostring(k))
+		return nil
+	end,
+}
+
+local function collectModules(spec)
+	local list = {}
+	local inner = spec[1]        -- 模块清单是第一个位置参数，不是 spec 本身
+	if type(inner) == "table" then
+		for _, item in ipairs(inner) do
+			local n = modNameOf(item)
+			if n then list[#list + 1] = n end
+		end
+	end
+	return list
+end
+
+local function new(spec)
+	spec = spec or {}
+	local self = setmetatable({}, recMT)
+	self._feed = spec.feed
+	self._modules = collectModules(spec)
+
+	if spec.moduleName then
+		-- 模块记录（include/ 里的库）
+		self._moduleName = spec.moduleName
+		self._name = spec.name or spec.moduleName
+		-- createDummyRef 等价物（照抄真框架的双层结构，ModuleLoader.moon:57-67）：
+		--   self._dummy = {}                                        ← ref 本体
+		--   byName[moduleName] = setmetatable({标记}, self._dummy)   ← 包装表，元表 = ref
+		-- register 时设 self._dummy.__index = 真内容 ⇒ 对 wrapped 而言它就是 __index 元方法
+		-- ⇒ 早先拿到 wrapped 的依赖方自动"长出"真内容（循环依赖的关键）。
+		if not byName[self._moduleName] then
+			self._dummy = {}
+			byName[self._moduleName] = setmetatable({ __depctrlDummy = true }, self._dummy)
+		end
+	else
+		-- 脚本记录（autoload/ 里的自动化脚本）
+		self._scriptName = g("script_name")
+		self._scriptDescription = g("script_description")
+		self._namespace = spec.namespace or g("script_namespace")
+	end
+
+	diag("载入：%s  模块清单 %d 个 [%s]",
+		who(self), #self._modules, table.concat(self._modules, ", "))
+	return self
+end
+
+-- Aegisub 不自带 json.lua，真框架用 l0.dkjson 顶上（provideBundled）。
+-- 这里照做，否则 a-mo.Aegisub-Motion 清单里的 "json" 会加载失败。
+package.preload["json"]   = package.preload["json"]   or function() return require("l0.dkjson") end
+package.preload["dkjson"] = package.preload["dkjson"] or function() return require("l0.dkjson") end
+
+diag("=== 替身 v5 被加载 ===（命中路径：%s）", SELF)
+
+-- ── 类字段 ────────────────────────────────────────────────
+-- 实测（v2 轮探针）模块生态访问的类字段只有 UnitTestSuite（×3），用法是：
+--     DependencyControl.UnitTestSuite.UnitTest.equals / .itemsEqual
+-- 这两个函数的真身就在框架自带的轻量工具模块 l0.DependencyControl.utils 里（已实测该模块
+-- 可以脱离 Aegisub 独立加载）⇒ 直接借它，拿到的是真实现而不是 stub。
+local classFields = {}
+do
+	local okU, utilsMod = pcall(require, "l0.DependencyControl.utils")
+	if okU and type(utilsMod) == "table" then
+		classFields.UnitTestSuite = { UnitTest = utilsMod }
+		diag("类字段 UnitTestSuite ← 已接入真 utils 模块（equals / itemsEqual 可用）")
+	else
+		diag("⚠️ l0.DependencyControl.utils 借不到（%s）⇒ UnitTestSuite 退回万能 stub", tostring(utilsMod):sub(1, 60))
+	end
+end
+
+-- 递归万能 stub：任何字段访问 / 调用都返回自身 ⇒ 多层链式访问也不崩（v2 的单层 stub 就是栽在
+-- DependencyControl.UnitTestSuite.UnitTest 这种两段访问上）。行为是静默 no-op，由探针日志暴露。
+local function makeStub()
+	local s
+	s = setmetatable({}, {
+		__index = function() return s end,
+		__call = function() return s end,
+	})
+	return s
+end
+
+return setmetatable(M, {
+	__call = function(_, spec) return new(spec) end,
+	__index = function(_, k)
+		local known = classFields[k]
+		if known ~= nil then return known end
+		diag("⚠️ 探针：类字段 DependencyControl.%s 未实现 → 递归万能 stub", tostring(k))
+		return makeStub()
+	end,
+})
+]==]
+
+local function apply_depctrl_shim()
+	-- 只动"真由 ① 编译出来"的那一份：连 .moon 源都找不到，说明这台机器上 DepCtrl 不是
+	-- 本方案预期的形态（用户手工换过 / 装的是别的发行版）⇒ 一律不碰。宁可少做，不碰别人的东西。
+	local have_src = false
+	for _, s in ipairs(SRCS) do
+		if lfs.attributes(s .. "/l0/DependencyControl.moon", "mode") == "file" then have_src = true break end
+	end
+	if not have_src then return end
+
+	local cur = (lfs.attributes(SHIM_TARGET, "mode") == "file") and readraw(SHIM_TARGET) or nil
+	local is_shim     = (cur ~= nil and cur == SHIM_SRC)
+	local has_standby = (lfs.attributes(SHIM_STANDBY, "mode") == "file")
+
+	if not DEPCTRL_SHIM then
+		-- 关闭态：装过才还原。判据 = "待命件在" 且 "当前那份确实是替身（或已被删）" ——
+		-- 当前不是替身，说明现场已被别的东西取代（① 重编译 / 用户自己换了），那就别乱覆盖。
+		if has_standby and (is_shim or cur == nil) then
+			if copy_raw(SHIM_STANDBY, SHIM_TARGET) then
+				os.remove(SHIM_STANDBY)
+				log("替身：已关闭（DEPCTRL_SHIM=false）→ 真框架产物已还原，加载恢复原样")
+			else
+				log("替身：还原失败（拷贝没成功），现场保持原状；可手工把 l0/DependencyControl.lua.bak 改名去掉 .bak")
+			end
+		end
+		return
+	end
+
+	if cur == nil then
+		return                              -- 产物还没编出来（首次运行 / ① 失败）⇒ 下一轮再说
+	end
+	if is_shim then return end              -- 已就位：幂等静默（这轮不写盘、不记日志）
+
+	-- 目标不是当前版替身 ⇒ 它是两种东西之一，处理完全不同：
+	--   · 旧版替身（§⑥ 升级过）⇒ 直接覆盖。**绝不能把它存成 .bak** ——
+	--     那会把旁边那份真框架产物顶掉，用户就再也恢复不回真框架了。
+	--   · 真框架产物 ⇒ 首次启用 / ① 因 .moon 变更重编译 / 用户手工还原。
+	local cur_is_old_shim = (cur:find(SHIM_MARK, 1, true) ~= nil)
+	local need_standby = false
+	if not cur_is_old_shim then
+		need_standby = (not has_standby) or (readraw(SHIM_STANDBY) ~= cur)
+		if need_standby then
+			if not copy_raw(SHIM_TARGET, SHIM_STANDBY) then
+				-- 宁可继续慢，也不能造成"真框架产物无处可还原"的局面。
+				log("替身：待命件备份失败 —— 本轮不替换（真框架产物必须留得住）")
+				return
+			end
+			log("替身：真框架产物已另存为 l0/DependencyControl.lua.bak（复原用）")
+		end
+	end
+
+	local f = io.open(SHIM_TARGET, "w")
+	if not f then log("替身：写入失败（权限？）—— 下一轮重试"); return end
+	f:write(SHIM_SRC)
+	f:close()
+
+	local lsz = lfs.attributes(SHIMLOG, "size")
+	if lsz and lsz > SHIM_LOG_MAX then os.remove(SHIMLOG) end
+
+	if cur_is_old_shim then
+		log(string.format("替身：已更新到新版本（旧版 %d B → %d B）；旁边那份 .bak 是真框架产物，本轮没动它",
+			#cur, #SHIM_SRC))
+	elseif need_standby then
+		log("替身：已启用 —— DepCtrl 框架不再加载；脚本与模块的自动更新随之停用（复原方法见 include.boost.lua/README.txt）")
+	else
+		log("替身：已重新就位 —— 目标变回了真框架（手工还原 / ① 重编译）。若你是想长期停用它：把 ⑥ 上面的 DEPCTRL_SHIM 改成 false")
+	end
+end
+
+-- 产物目录自述：**每轮按"当前实际形态"生成**（替身那段的措辞随开关变化）。
+--   与停放区 README 同一个原则：内容没变就一个字都不写（静默轮次零写入）。
+local DSTREADME = DST .. "/README.txt"
+local function write_dst_readme()
+	local shim_on = DEPCTRL_SHIM and (readraw(SHIM_TARGET) == SHIM_SRC)
+	local L = {}
+	local function add(x) L[#L + 1] = x end
+	add("include.boost.lua/ —— boost 脚本生成的编译产物（**整个目录可删**，下次启动自动重建）")
+	add("")
+	add("【本目录是什么】")
+	add("  ① 编译：include/ 下的每个 .moon → 这里对应的 .lua（Aegisub 直接读，跳过 MoonScript 现编译）")
+	add("  ③ 镜像：include/ 下的原生 .lua 等（非 .moon）原样复制过来")
+	add("  目的：require 的 package.path 第一项就是本目录 ⇒ 全部命中产物，不再落回 include/ 原件。")
+	add("  autoload/ 里那些**无扩展名的符号链接**（a-mo / arch / l0 / phos …）就指向本目录 ——")
+	add("  这也是本目录不能改名、不能搬家的原因。")
+	add("")
+	if shim_on then
+		add("【DepCtrl 替身】← 当前状态：**已启用**")
+		add("  l0/DependencyControl.lua 是 **l0.DependencyControl 的轻量替身**，不是真框架。")
+		add("  · 真框架 42 个模块 / 474 KB，7 个用它的脚本各自要完整执行一遍（Aegisub 不共享")
+		add("    package.loaded）⇒ 实测合计约 6 秒。替身只实现脚本真正用到的 6 个接口。")
+		add("  · 实测收益：主窗口 4.101 s → 0.880 s。")
+		add("  · 代价：脚本与模块**不再自动更新**（DepCtrl 的核心功能就是按 feed 自动升级）。")
+		add("    这是省时的来源，不是故障。想升级：手动覆盖，或先关闭替身跑一轮。")
+		add("  · 真框架的编译产物就在旁边待命：l0/DependencyControl.lua.bak")
+		add("")
+		add("  【想恢复真框架】任选一条：")
+		add("    ① 长期（推荐）：把 boost 脚本里的 DEPCTRL_SHIM 改成 false ⇒ 下次启动自动还原，")
+		add("       并且之后不再装回（脚本还会顺手删掉那份 .bak）。")
+		add("    ② 临时应急：删掉 l0/DependencyControl.lua，把 l0/DependencyControl.lua.bak 改名")
+		add("       去掉 .bak 后缀 ⇒ 本次启动就是真框架。")
+		add("       ⚠️ 只要 DEPCTRL_SHIM 还是 true，下次启动会把替身装回去 —— 所以它只顶一次。")
+		add("       （若 .bak 不在：直接删掉 l0/DependencyControl.lua 即可，下一轮 ① 会从 .moon 源重编一份出来。）")
+		add("    ③ 更新框架：往 include/l0/ 放新的 DependencyControl.moon ⇒ ① 会重新编译并顶掉替身")
+		add("       （本脚本检测到后，会把新产物另存为新的 .bak 再装上替身）。")
+		add("")
+		add("  【想确认它有没有在工作】看 ../Atypical.Aegisub.Startup.Boost/depctrl-shim.log")
+		add("    · 正常：每次启动 5 行「替身被加载」+ 若干「注册模块」「注册宏」")
+		add("    · 异常：出现「失败：」或「⚠️ 探针」⇒ 把内容发来即可定位")
+		add("    · 这个日志可以随时删（下次启动重新累积；超过 1 MB 脚本会自动清空）")
+	else
+		add("【DepCtrl 替身】← 当前状态：未启用")
+		add("  l0/DependencyControl.lua 就是真框架的正常编译产物，一切与未启用时相同。")
+		add("  想启用它（本机实测可省约 3.2 秒启动时间）：把 boost 脚本里的 DEPCTRL_SHIM 改成 true。")
+		add("  代价是脚本与模块不再自动更新 —— 细节见 boost 脚本 §⑥ 的注释。")
+	end
+	add("")
+	add("【注意】")
+	add("  · 本目录**整个可以删** —— 里面的东西全部能从 include/ 重新生成（包括那份 .bak）。")
+	add("  · 别手工编辑这里的 .lua：下次启动会被覆盖。唯一例外是名字带 .bak 的 —— 所有 pass 都不碰它。")
+
+	local text = table.concat(L, "\n") .. "\n"
+	local old
+	local f = io.open(DSTREADME, "r")
+	if f then old = f:read("a"); f:close() end
+	if old == text then return end                      -- 内容没变就不写（静默轮次零写入）
+	local w = io.open(DSTREADME, "w")
+	if w then
+		w:write(text); w:close()
+		log("产物目录：README.txt 已按当前内容重写（替身" .. (shim_on and "启用中" or "未启用") .. "）")
+	end
+end
+
 -- Backup 里有没有这个产物对应的**源**？
 --   产物的相对路径（相对 include.boost.lua/）与源（相对 include/）同构，只有扩展名可能不同：
 --     include/pkg/a.moon  --编译-->  pkg/a.lua      候选：pkg/a.lua（镜像产物）/ pkg/a.moon（编译产物）
@@ -1171,6 +1624,13 @@ local function cleanup(exp, st)
 		if not exp[rel] then
 			if nm:sub(1, 1) == "." then
 				st.hidden = st.hidden + 1        -- 隐藏文件（.DS_Store 之类）不是本脚本产物，不碰
+			elseif is_backup_name(nm) then
+				-- 名字带 .bak 的不是产物，是"你自己留的备份"（含 ⑥ 的 DependencyControl.lua.bak
+				-- 待命件）。镜像与对账本来就豁免它，清理也照同一口径 —— 否则每轮都会走到下面
+				-- 那条"产物保留"分支、白刷一行日志，把真正的异常信号淹掉。
+				st.keep = st.keep + 1
+			elseif rel == "README.txt" then
+				st.keep = st.keep + 1            -- ⑥ 写的本目录自述：boost 自己生成，不是"产物"
 			elseif not repo_has_source(rel) then
 				-- Backup 里找不到这个产物对应的源 ⇒ 它可能是那份内容**仅存的形式**，不删。
 				-- （正常的历史孤儿产物，源都还在 Backup 里，所以会被正常删掉；这条只兜真正的例外。）
@@ -1481,6 +1941,16 @@ local function selftest()
 	for _, r in ipairs(wf) do
 		if ((r:match("([^/]+)$") or r):sub(1, 1) == ".") then wh = wh + 1 end
 	end
+	-- "非产物"的文件要先刨掉，否则差值永远不是 0、自检就从"越干净越好"退化成"差 N 是常态"：
+	--   · 隐藏文件（.DS_Store 之类）
+	--   · 名字带 .bak 的（你自己留的备份 + §⑥ 那份真框架产物待命件）
+	--   · README.txt（§⑥ 写的本目录自述）
+	-- 口径与 ⑤-b 清理完全一致（那边也是这三条一起豁免）。
+	local vex = 0
+	for _, r in ipairs(wf) do
+		local nm = r:match("([^/]+)$") or r
+		if nm:sub(1, 1) ~= "." and (is_backup_name(nm) or nm == "README.txt") then vex = vex + 1 end
+	end
 	-- 期望值按源现状实时推算（调的就是 ⑤ 用的 expected_map，口径绝对一致），不写死常量：
 	-- 写死常量的话，源一增减它就变成假警报（"差"永远不为 0，看着像脚本坏了）。
 	-- 注：自检跑在本轮编译之前，若刚加了源还没编译，差为负属正常。
@@ -1490,9 +1960,9 @@ local function selftest()
 		exp_n = 0
 		for _ in pairs(em) do exp_n = exp_n + 1 end
 	end
-	log("自检：walk_rel(DST) 扫到 " .. #wf .. " 个文件（隐藏 " .. wh .. "）/ " .. #wd .. " 个目录"
+	log("自检：walk_rel(DST) 扫到 " .. #wf .. " 个文件（隐藏 " .. wh .. " / 非产物 " .. vex .. "）/ " .. #wd .. " 个目录"
 		.. "   ← 按源推算应有 " .. (exp_n and tostring(exp_n) or "?（推算失败）")
-		.. " 个（差 " .. (exp_n and (#wf - wh - exp_n) or "-") .. "；差 0 为正常）")
+		.. " 个（差 " .. (exp_n and (#wf - wh - vex - exp_n) or "-") .. "；差 0 为正常）")
 
 	-- ⚠️ 判"删空目录成没成"要看路径在不在，不看返回值（见 cleanup 里的长注释）
 	local rd = lfs.rmdir(dt)
@@ -1553,6 +2023,7 @@ local function run()
 	-- ⑤ 的统计：reap_mothers 跑在 ② 之前，所以在这里先声明
 	local st = { removed = 0, rmdirs = 0, reaped = 0, link_add = 0, link_del = 0,
 	             nosrc = 0, hidden = 0, scanned = 0, want = 0, rm_fail = 0,
+	             keep = 0,
 	             link_have = 0,
 	             ch_add = 0, ch_mod = 0, ch_del = 0, ch_same = 0,
 	             au_same = 0, au_mod = 0, au_add = 0, au_del = 0, au_off = 0, au_live = 0,
@@ -1659,6 +2130,12 @@ local function run()
 		end
 	end
 
+	-- ⑥ DepCtrl 替身维护（幂等：内容一致就一个字都不写）+ 产物目录自述
+	--    放在 ③ 之后：镜像那一步会把 include/ 下的原生 .lua 同步过来，先让它同步完再判断；
+	--    放在 ⑤-b 之前：清理要扫产物目录，那时替身与自述都已就位（否则会各白刷一行"无源保留"）。
+	apply_depctrl_shim()
+	write_dst_readme()
+
 	-- ⑤-b 对账清理：删源即删产物（推算式，不读历史记录）
 	local exp, srcs_ok = nil, true
 	for _, s in ipairs(SRCS) do
@@ -1697,8 +2174,8 @@ local function run()
 	log(string.format("变更：新增 %d / 修改 %d / 删除 %d / 未变 %d  -> Backup/changes.log",
 		st.ch_add, st.ch_mod, st.ch_del, st.ch_same))
 	if exp and CLEANUP_ENABLED then
-		log(string.format("清理：扫描 %d 个产物文件（隐藏 %d）/ 判定该清 %d / 已删除 %d / 删除失败 %d",
-			st.scanned, st.hidden, st.want, st.removed, st.rm_fail))
+		log(string.format("清理：扫描 %d 个产物文件（隐藏 %d / 自产或备份 %d）/ 判定该清 %d / 已删除 %d / 删除失败 %d",
+			st.scanned, st.hidden, st.keep, st.want, st.removed, st.rm_fail))
 		log(string.format("清理：清空目录 %d / 移除母本 %d / 链接 现有%d (+%d -%d) / 无源保留 %d",
 			st.rmdirs, st.reaped, st.link_have, st.link_add, st.link_del, st.nosrc))
 	elseif exp then
